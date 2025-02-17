@@ -1,3 +1,5 @@
+%%writefile image_cv_ops.cu
+
 #include <cuda_runtime.h>
 #include <stdio.h>
 #include <fstream>
@@ -17,7 +19,7 @@ __global__ void apply_gaussian_blur(const float *image, float *out_image, int he
 
     int pixel_index = y * width + x;
 
-    // create the gaussian kernel
+    // create the edge kernel
     float kernel[3][3] = {
         {1.0/16, 2.0/16, 1.0/16},
         {2.0/16, 4.0/16, 2.0/16},
@@ -53,7 +55,7 @@ void run_gaussian_blur(const float *image, float *out_image, int height, int wid
 
     // TODO: apply gaussian blur to image
 
-    dim3 block(32, 32);
+    dim3 block(16, 16);
     dim3 grid((width + block.x - 1) / block.x, (height + block.y - 1) / block.y);
 
     apply_gaussian_blur<<<grid, block>>>(d_image, d_out_image, height, width);
@@ -88,6 +90,9 @@ int main() {
 
    // apply gaussian blur to image
    run_gaussian_blur(h_image, h_out_image, image.rows, image.cols);
+   run_gaussian_blur(h_out_image, h_out_image, image.rows, image.cols);
+   run_gaussian_blur(h_out_image, h_out_image, image.rows, image.cols);
+   run_gaussian_blur(h_out_image, h_out_image, image.rows, image.cols);
 
    // convert the output image back to cv::Mat
    cv::Mat out_image_mat(image.size(), CV_32F, h_out_image);
