@@ -1,36 +1,21 @@
 #include <cuda_runtime.h>
 #include <stdio.h>
 #include <fstream>
+#include <opencv2/opencv.hpp>
+#include <iostream>
+#include <cstdlib>
 
-void save_image_to_pgm(const char* filename, const float* image) {
-    int width = 512;
-    int height = 512;
-    std::ofstream file(filename, std::ios::out | std::ios::binary);
-    if (!file) {
-        printf("Could not open file for writing\n");
-        return;
-    }
-
-    // Write the PGM header
-    file << "P5\n" << width << " " << height << "\n255\n";
-
-    // Write the pixel data
-    for (int i = 0; i < width * height; ++i) {
-        unsigned char pixel = static_cast<unsigned char>(image[i] * 255.0f);
-        file.write(reinterpret_cast<char*>(&pixel), sizeof(pixel));
-    }
-
-    file.close();
-}
-
-
-__global__ void apply_gaussian_blur(const float *image, float *out_image, int num_pixels) {
+__global__ void apply_gaussian_blur(const float *image, float *out_image, int height, int width) {
     // conditional in place when num threads exceed needed operations.
-    if (threadIdx.x >= num_pixels) {
-        return;
+
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height) {
+      return;
     }
 
-    int pixel_index = threadIdx.x;
+    int pixel_index = y * width + x;
 
     // create the gaussian kernel
     float kernel[3][3] = {
@@ -40,29 +25,38 @@ __global__ void apply_gaussian_blur(const float *image, float *out_image, int nu
     };
 
     // apply blur to image, pasting to out_image
-    int kernel_size = 3;
-    float sum = 0;
-    for (int i = 0; i < kernel_size; i++) {
-        for (int j  = 0; j < kernel_size; j++) {
-            int image_index = pixel_index + i * kernel_size + j;
-            sum += image[image_index] * kernel[i][j];
+    int half_kernel_size = 1;
+    float sum = 0.0f;
+
+    for (int i = -half_kernel_size; i <= half_kernel_size; i++) {
+        for (int j = -half_kernel_size; j <= half_kernel_size; j++) {
+            int neighbor_x = x + j;
+            int neighbor_y = y + i;
+            // Check for image edge conditions
+            if (neighbor_x >= 0 && neighbor_x < width && neighbor_y >= 0 && neighbor_y < height) {
+                int neighbor_index = neighbor_y * width + neighbor_x;
+                sum += image[neighbor_index] * kernel[i + half_kernel_size][j + half_kernel_size];
+            }
         }
     }
     out_image[pixel_index] = sum;
 }
 
-void run_gaussian_blur(const float *image, float *out_image, int num_pixels) {
+void run_gaussian_blur(const float *image, float *out_image, int height, int width) {
     // copy image to VRAM (shared memory)
+    int num_pixels = height * width;
     size_t size_pixels = num_pixels * sizeof(float);
     float* d_image, *d_out_image;
     cudaMalloc(&d_image, size_pixels);
     cudaMalloc(&d_out_image, size_pixels);
     cudaMemcpy(d_image, image, size_pixels, cudaMemcpyHostToDevice);
 
-    // apply gaussian blur to image
-    int threadsPerBlock = 256;
-    int blocksPerGrid = (num_pixels + threadsPerBlock - 1) / threadsPerBlock;
-    apply_gaussian_blur<<<blocksPerGrid, threadsPerBlock>>>(d_image, d_out_image, num_pixels);
+    // TODO: apply gaussian blur to image
+
+    dim3 block(32, 32);
+    dim3 grid((width + block.x - 1) / block.x, (height + block.y - 1) / block.y);
+
+    apply_gaussian_blur<<<grid, block>>>(d_image, d_out_image, height, width);
 
     // copy image back to host
     cudaMemcpy(out_image, d_out_image, size_pixels, cudaMemcpyDeviceToHost);
@@ -73,33 +67,35 @@ void run_gaussian_blur(const float *image, float *out_image, int num_pixels) {
 }
 
 int main() {
-    // PROBLEM: apply a gaussian blur to an image using CUDA
+   // open image using cv::imread()
+   cv::Mat image = cv::imread("1b_cat.bmp", cv::IMREAD_GRAYSCALE);
+   if (image.empty()) {
+       printf("Could not open or find the image\n");
+       return -1;
+   }
 
-    // Define image dimensions
-    int width = 512;
-    int height = 512;
-    int num_pixels = width * height;
 
-    // create h_image using "1b_cat.bmp" to grayscale
-    float* h_image = (float*) malloc(num_pixels * sizeof(float));
-    std::ifstream file("1b_cat.bmp", std::ios::in | std::ios::binary);
-    if (!file) {
-        printf("Could not open file for reading\n");
-        return 1;
+   int num_pixels = image.rows * image.cols;
+   float *h_image = (float*) malloc(num_pixels * sizeof(float));;
+   float *h_out_image = (float*) malloc(num_pixels * sizeof(float));
+
+   // Convert the image data from uchar to float.
+   for (int i = 0; i < num_pixels; ++i) {
+      h_image[i] = static_cast<float>(image.data[i]);
     }
 
-    // Allocate memory for the output image
-    float* h_out_image = (float*) malloc(num_pixels * sizeof(float));
+   printf("number of pixels are %d \n", num_pixels);
 
-    // Apply gaussian blur to image
-    run_gaussian_blur(h_image, h_out_image, num_pixels);
+   // apply gaussian blur to image
+   run_gaussian_blur(h_image, h_out_image, image.rows, image.cols);
 
-    // Save the output image to a PGM file
-    save_image_to_pgm("blurred_image.pgm", h_out_image, width, height);
+   // convert the output image back to cv::Mat
+   cv::Mat out_image_mat(image.size(), CV_32F, h_out_image);
+   cv::Mat out_image_8U;
+   out_image_mat.convertTo(out_image_8U, CV_8U);
+   cv::imwrite("blurred_image.jpg", out_image_8U);
 
-    // Clean up
-    free(h_image);
-    free(h_out_image);
-
-    return 0;
+   // clean up
+   free(h_out_image);
+   return 0;
 }
